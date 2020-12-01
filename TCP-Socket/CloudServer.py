@@ -1,83 +1,52 @@
 import socket
 import sys
-import _thread
-import pickle
-import time
+import threading
+from mxnet import nd
+from Utils import *
 
 class CloudServer:
     def __init__(self):
-        self.gradient = None
+        self.parameter = [nd.random_normal(0,1,shape=(128,784))] +\
+                    [nd.random_normal(0,1,shape=(128))] +\
+                    [nd.random_normal(0,1,shape=(64,128))] +\
+                    [nd.random_normal(0,1,shape=(64))] +\
+                    [nd.random_normal(0,1,shape=(10,64))] +\
+                    [nd.random_normal(0,1,shape=(10))]
+        self.buffer = []
+        self.cv = threading.Condition()
+        self.terminated = False
+        self.connections = []
+        self.num_edge_servers = 1
+        self.num_epochs = 3
 
-    def run_server(self):
-        HOST = socket.gethostname()	# Symbolic name meaning all available interfaces
-        PORT = 9999	# Arbitrary non-privileged port
+    def process(self):
+        HOST = socket.gethostname()
+        PORT = 9999
+        connection_thread = threading.Thread(target=server_handle_connection, args=(HOST, PORT, self, True))
+        connection_thread.start()
 
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        print('Socket created')
+        with self.cv:
+            while len(self.connections) < 1:
+                self.cv.wait()
 
-        #Bind socket to local host and port
-        try:
-            s.bind((HOST, PORT))
-        except socket.error as msg:
-            print('Bind failed. Error :', msg)
-            sys.exit()
-	
-        print('Socket bind complete')
+        for i in range(self.num_epochs):
+            for conn in self.connections:
+                send_message(self.parameter, self.connections[0])
+            print('sent parameter to edge servers')
 
-        #Start listening on socket
-        s.listen(10)
-        print('Socket now listening')
+            # wait for response from edge servers
+            with self.cv:
+                while len(self.buffer) < self.num_edge_servers:
+                    self.cv.wait()
+            print('received responses from edge servers')
 
-        #Function for handling connections. This will be used to create threads
-        def clientthread(conn):
-            #infinite loop so that function do not terminate and thread do not end.
-            while True:
-                conn.setblocking(0)
-                timeout = 1
-                begin = time.time()
-                #Now receive data
-                data = b""
-                while True:
-                    if data and time.time() - begin > timeout:
-                        break
-                    if time.time() - begin > timeout * 2:
-                        break
-                    
-                    try:
-                        packet = conn.recv(4096)
-                        if packet:
-                            data += packet
-                    except:
-                        pass
-                
-                if data:
-                    self.gradient = pickle.loads(data)
+            self.parameter = self.aggregate()
 
-                print('gradient received from RSU : ', repr(self.gradient))
+        self.terminated = True
 
-                # conn.setblocking(1)
-                gradient_ = pickle.dumps(self.gradient)
-                try :
-                    #Set the whole string
-                    conn.sendall(gradient_)
-                except socket.error:
-                    #Send failed
-                    print('Send failed')
-                    sys.exit()
-            #came out of loop
-            conn.close()
-
-        #now keep talking with the client
-        while True:
-            #wait to accept a connection - blocking call
-            conn, addr = s.accept()
-            print('Connected with ' + addr[0] + ':' + str(addr[1]))
-            
-            #start new thread takes 1st argument as a function name to be run, second is the tuple of arguments to the function.
-            _thread.start_new_thread(clientthread, (conn,))
-
-        s.close()
+    def aggregate(self):
+        return self.buffer.pop()
 
 if __name__ == "__main__":
     cloud_server = CloudServer()
-    cloud_server.run_server()
+    cloud_server.process()
